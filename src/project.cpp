@@ -385,6 +385,140 @@ bool ProjectStructure::ProjectInfo::setupProject(const Configuration& config)
         return false;
     }
 
+    //--
+
+    {
+        auto scriptFilePath = (rootPath / "BUILD").u8string();
+        FILE* f = NULL;
+        fopen_s(&f, scriptFilePath.c_str(), "w");
+        if (f)
+        {
+            fprintf(f, "# InfernoEngine Project Configuration\n");
+
+            if (type == ProjectType::LocalApplication)
+            {
+                if (hasTests)
+                    fprintf(f, "TYPE: test\n");
+                else
+                    fprintf(f, "TYPE: app\n");
+
+                if (!appClassName.empty())
+                    fprintf(f, "APP_CLASS: %hs\n", appClassName.c_str());
+				if (!appHeaderName.empty())
+					fprintf(f, "APP_HEADER: %hs\n", appHeaderName.c_str());
+
+                if (flagConsole)
+                    fprintf(f, "SUBSYSTEM: console\n");
+                else
+                    fprintf(f, "SUBSYSTEM: windows\n");
+            }
+            else if (type == ProjectType::LocalLibrary)
+            {
+				if (flagForceSharedLibrary)
+					fprintf(f, "TYPE: dll\n");
+				else if (flagForceStaticLibrary)
+					fprintf(f, "TYPE: static\n");
+                else
+                    fprintf(f, "TYPE: library\n");
+            }
+            else if (type == ProjectType::ExternalLibrary)
+            {
+                fprintf(f, "TYPE: external_library\n");
+            }
+            else if (type == ProjectType::MonoScriptProject)
+			{
+				fprintf(f, "TYPE: mono\n");
+            }
+
+            if (!assignedVSGuid.empty())
+                fprintf(f, "GUID: %s\n", assignedVSGuid.c_str());
+			if (!assignedProjectFile.empty())
+				fprintf(f, "PROJECT_FILE: %s\n", assignedProjectFile.c_str());            
+
+            if (filter == ProjectFilePlatformFilter::Generic_Console)
+                fprintf(f, "FILTER: console\n");
+			else if (filter == ProjectFilePlatformFilter::Generic_POSIX)
+                fprintf(f, "FILTER: posix\n");
+			else if (filter == ProjectFilePlatformFilter::Generic_DirectX)
+				fprintf(f, "FILTER: directx\n");
+            else if (filter == ProjectFilePlatformFilter::Generic_OpenGL)
+				fprintf(f, "FILTER: ogl\n");
+			else if (filter == ProjectFilePlatformFilter::Windows)
+				fprintf(f, "FILTER: windows\n");
+			else if (filter == ProjectFilePlatformFilter::UWP)
+				fprintf(f, "FILTER: uwp\n");
+			else if (filter == ProjectFilePlatformFilter::Linux)
+				fprintf(f, "FILTER: linux\n");
+			else if (filter == ProjectFilePlatformFilter::Scarlett)
+				fprintf(f, "FILTER: scarlett\n");
+			else if (filter == ProjectFilePlatformFilter::Prospero)
+				fprintf(f, "FILTER: prospero\n");
+
+            fprintf(f, "\n");
+
+            if (flagDevOnly)
+                fprintf(f, "TOGGLE: dev ON\n");            
+
+            if (flagNoWarnings)
+                fprintf(f, "TOGGLE: warnings OFF\n");
+			else if (flagWarn3)
+				fprintf(f, "TOGGLE: warnings 3\n");
+
+			if (flagNoInit)
+				fprintf(f, "TOGGLE: noinit ON\n");
+			if (flagNoSymbols)
+				fprintf(f, "TOGGLE: symbols OFF\n");
+			if (flagPureDynamicLibrary)
+				fprintf(f, "TOGGLE: dependency OFF\n");
+			if (flagGlobalInclude)
+				fprintf(f, "TOGGLE: global ON\n");
+			if (flagGlobalInclude)
+				fprintf(f, "TOGGLE: main ON\n");
+			if (flagAllowExceptions)
+				fprintf(f, "TOGGLE: exceptions ON\n");
+			if (!flagUsePCH)
+				fprintf(f, "TOGGLE: pch OFF\n");
+
+            if (!dependencies.empty() || !optionalDependencies.empty())
+            {
+                fprintf(f, "\n");
+
+                for (const auto& dep : dependencies)
+                    fprintf(f, "DEPENDENCY: %s\n", dep.c_str());
+
+                for (const auto& dep : optionalDependencies)
+                    fprintf(f, "DEPENDENCY: %s OPTIONAL\n", dep.c_str());
+            }
+
+            if (!localIncludeDirectories.empty())
+            {
+                fprintf(f, "\n");
+
+                for (const auto& dep : localIncludeDirectories)
+                    fprintf(f, "INCLUDE: \"%s\"\n", dep.c_str());
+            }
+
+            if (!libraryInlcudePaths.empty() || !libraryLinkFile.empty())
+            {
+                for (const auto& dep : libraryInlcudePaths)
+                {
+                    const auto path = dep.u8string();
+                    fprintf(f, "LIBRARY_INCLUDE: %s\n", path.c_str());
+                }
+
+				for (const auto& dep : libraryLinkFile)
+				{
+					const auto path = dep.u8string();
+					fprintf(f, "LIBRARY_LIB: %s\n", path.c_str());
+				}
+            }
+
+            fclose(f);
+        }
+    }
+
+    //--
+
     return !hasScriptErrors;
 }
 
