@@ -64,9 +64,13 @@ struct ProjectGenerator : public FileGenerator
     
     struct GeneratedProject
     {
-        const ProjectStructure::ProjectInfo* originalProject;
+        const ProjectStructure::ProjectInfo* originalProject = nullptr;
 
         bool hasReflection = false;
+        bool hasEmbeddedFiles = false;
+        bool willBeDLL = false;
+        bool willBeLinked = false;
+        bool willHaveEntryPoint = false;
 
         GeneratedGroup* group = nullptr;
 
@@ -77,6 +81,7 @@ struct ProjectGenerator : public FileGenerator
 
         fs::path localGlueHeader; // _glue.inl file
         fs::path localPublicHeader; // include/public.h file
+        fs::path localReflectionFile; // generated/base_math/reflection.cpp
 
         std::vector<GeneratedProject*> directDependencies;
         std::vector<GeneratedProject*> allDependencies;
@@ -107,6 +112,8 @@ struct ProjectGenerator : public FileGenerator
 
     GeneratedGroup* createGroup(std::string_view name);
 
+    GeneratedProject* findProject(std::string_view name);
+
     GeneratedGroup* rootGroup = nullptr;
 
     std::vector<GeneratedProject*> projects;
@@ -135,13 +142,19 @@ private:
     bool processBisonFile(GeneratedProject* project, const GeneratedProjectFile* file);
 
     bool generateProjectGlueFile(const GeneratedProject* project, std::stringstream& outContent);
+    bool generateProjectModuleGlueFile(const GeneratedProject* project, const ProjectStructure::ProjectInfo* sourceProject, std::stringstream& outContent);
     bool generateProjectStaticInitFile(const GeneratedProject* project, std::stringstream& outContent);
     bool generateProjectDefaultReflection(const GeneratedProject* project, std::stringstream& outContent);
+    bool generateProjectBuildSourceFile(const GeneratedProject* project, std::stringstream& outContent);
+    bool generateProjectMainSourceFile(const GeneratedProject* project, std::stringstream& outContent);
+    bool generateProjectBuildHeaderFile(const GeneratedProject* project, std::stringstream& outContent);
+
+    bool generateSolutionEmbeddFileList(std::stringstream& outContent);
+    bool generateSolutionReflectionFileList(std::stringstream& outContent);
 
     bool projectRequiresStaticInit(const GeneratedProject* project) const;
 
     bool shouldUseFile(const ProjectStructure::FileInfo* file) const;
-    bool shouldStaticLinkProject(const GeneratedProject* project) const;
 
     GeneratedGroup* findOrCreateGroup(std::string_view name, GeneratedGroup* parent);
 

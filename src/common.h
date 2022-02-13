@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <iostream>
+#include <fstream>
 #include <iterator>
 #include <sstream>
 #include <string_view>
@@ -41,6 +42,7 @@ enum class ConfigurationType : uint8_t {
 
 enum class BuildType : uint8_t {
     Development, // includes development projects - editor, asset import, etc
+    Standalone, // glued standalone module files
     Shipment, // only final shipable executable (just game)
 
     MAX,

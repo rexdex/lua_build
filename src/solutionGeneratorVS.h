@@ -28,6 +28,7 @@ private:
     bool generateSourcesProjectFileEntry(const ProjectGenerator::GeneratedProject* project, const ProjectGenerator::GeneratedProjectFile* file, std::stringstream& f) const;
 
     bool generateRTTIGenProjectFile(const ProjectGenerator::GeneratedProject* project, std::stringstream& outContent) const;
+    bool generateEmbeddedMediaProjectFile(const ProjectGenerator::GeneratedProject* project, std::stringstream& outContent) const;
 
     void extractSourceRoots(const ProjectGenerator::GeneratedProject* project, std::vector<fs::path>& outPaths) const;
 

@@ -182,12 +182,12 @@ bool Configuration::parsePaths(const char* executable, const Commandline& cmd)
             return false;
         }
 
-        this->engineScriptPath = engineRootPath / "data" / "scripts";
+        /*this->engineScriptPath = engineRootPath / "data" / "scripts";
         if (!fs::is_directory(engineScriptPath))
         {
             std::cout << "Specified engine directory has no data/scripts directory\n";
             return false;
-        }
+        }*/
     }
 
     {
@@ -288,6 +288,7 @@ void ProjectStructure::ProjectInfo::internalRegisterFunctions(lua_State* L)
 
     internalRegisterFunction(L, "ProjectOption", &ExportProjectOption);
     internalRegisterFunction(L, "ProjectFilter", &ExportProjectFilter);
+    internalRegisterFunction(L, "ProjectModuleName", &ExportProjectModuleName);
     internalRegisterFunction(L, "FileOption", &ExportFileOption);
     internalRegisterFunction(L, "FileFilter", &ExportFileFilter);
     internalRegisterFunction(L, "ProjectType", &ExportProjectType);
@@ -295,6 +296,7 @@ void ProjectStructure::ProjectInfo::internalRegisterFunctions(lua_State* L)
     internalRegisterFunction(L, "DependencyOptional", &ExportLinkOptionalProject);
     internalRegisterFunction(L, "LocalDefine", &ExportLocalDefine);
     internalRegisterFunction(L, "GlobalDefine", &ExportGlobalDefine);
+    internalRegisterFunction(L, "LocalIncludeDir", &ExportLocalIncludeDir);    
     internalRegisterFunction(L, "Tool", &ExportTool);
     internalRegisterFunction(L, "Deploy", &ExportDeploy);
     internalRegisterFunction(L, "DeployDir", &ExportDeployDir);
@@ -305,6 +307,9 @@ void ProjectStructure::ProjectInfo::internalRegisterFunctions(lua_State* L)
     internalRegisterFunction(L, "AssignedGUID", &ExportAssignedGuid);
     internalRegisterFunction(L, "AssignedProjectFile", &ExportAssignedProjectFile);
     internalRegisterFunction(L, "ExternalIncludeDirectory", &ExportExternalIncludeDirectory);
+    internalRegisterFunction(L, "GenerateAppMain", &ExportAppMain);
+    
+
 }
 
 template< typename T >
@@ -391,7 +396,9 @@ ProjectFileType ProjectStructure::ProjectInfo::FileTypeForExtension(std::string_
         return ProjectFileType::CppSource;
     if (ext == ".bison")
         return ProjectFileType::Bison;
-    if (ext == ".lua")
+    if (ext == ".natvis")
+		return ProjectFileType::NatVis;
+	if (ext == ".lua")
         return ProjectFileType::BuildScript;
     if (ext == ".rc")
         return ProjectFileType::WindowsResources;
@@ -443,17 +450,8 @@ bool ProjectStructure::ProjectInfo::internalTryAddFileFromPath(const fs::path& a
     file->name = shortName;
     file->projectRelativePath = MakeGenericPathEx(fs::relative(absolutePath, rootPath));
     file->rootRelativePath = MakeGenericPathEx(fs::relative(absolutePath, group->rootPath));
+    file->originalProject = this;
 
-    if (EndsWith(file->name, "_test.cpp") || EndsWith(file->name, "_tests.cpp"))
-    {
-        if (!hasTests)
-        {
-            //std::cout << "Project '" << mergedName << "' determined to have tests\n";
-            hasTests = true;
-        }
-    }
-
-    filesMapByName[shortName] = file;
     filesMapByRelativePath[file->projectRelativePath] = file;
 
     files.push_back(file);
@@ -483,6 +481,50 @@ void ProjectStructure::ProjectInfo::scanFilesAtDir(const fs::path& directoryPath
     }
 }
 
+bool ProjectStructure::ProjectInfo::internalTryAddMediaFileFromPath(const fs::path& absolutePath)
+{
+    const auto ext = absolutePath.extension().u8string();
+
+    const auto shortName = absolutePath.filename().u8string();
+
+    auto* file = new FileInfo;
+    file->type = (ext == ".lua") ? ProjectFileType::MediaScript : ProjectFileType::MediaFile;
+    file->absolutePath = absolutePath;
+    file->name = shortName;
+    file->projectRelativePath = MakeGenericPathEx(fs::relative(absolutePath, rootPath));
+    file->rootRelativePath = MakeGenericPathEx(fs::relative(absolutePath, group->rootPath));
+    file->originalProject = this;
+    files.push_back(file);
+
+    if (file->type == ProjectFileType::MediaScript)
+        hasMedia = true;
+
+    return true;
+}
+
+void ProjectStructure::ProjectInfo::scanMediaFilesAtDir(const fs::path& directoryPath)
+{
+    try
+    {
+        if (fs::is_directory(directoryPath))
+        {
+            for (const auto& entry : fs::directory_iterator(directoryPath))
+            {
+                const auto name = entry.path().filename().u8string();
+
+                if (entry.is_directory())
+                    scanMediaFilesAtDir(entry.path());
+                else if (entry.is_regular_file())
+                    internalTryAddMediaFileFromPath(entry.path());
+            }
+        }
+    }
+    catch (fs::filesystem_error& e)
+    {
+        std::cout << "Filesystem Error: " << e.what() << "\n";
+    }
+}
+
 bool ProjectStructure::ProjectInfo::scanContent()
 {
     const auto buildPath = rootPath / "build.lua";
@@ -496,6 +538,12 @@ bool ProjectStructure::ProjectInfo::scanContent()
         scanFilesAtDir(rootPath / "res", false);
         scanFilesAtDir(rootPath / "natvis", false);
         scanFilesAtDir(rootPath / "src", false);
+    }
+
+    const auto mediaPath = rootPath / "media";
+    if (fs::is_directory(mediaPath))
+    {
+        scanMediaFilesAtDir(mediaPath);
     }
 
     sort(files.begin(), files.end(), [](const auto* a, const auto* b) -> bool {
@@ -571,6 +619,20 @@ int ProjectStructure::ProjectInfo::ExportProjectFilter(lua_State* L)
     }
 
     self->filter = filter;
+    return 0;
+}
+
+int ProjectStructure::ProjectInfo::ExportProjectModuleName(lua_State* L)
+{
+    auto* self = (ProjectInfo*)L->selfPtr;
+    std::string_view name = luaL_checkstring(L, 1);
+    if (name.empty())
+    {
+        std::cout << "Project'" << self->mergedName << "' has invalid module name : '" << name << "'\n";
+        self->hasScriptErrors = true;
+    }
+
+    self->moduleName = name;
     return 0;
 }
 
@@ -825,8 +887,10 @@ int ProjectStructure::ProjectInfo::ExportProjectType(lua_State* L)
         self->type = ProjectType::LocalLibrary;
         self->flagPureDynamicLibrary = true;
     }
-    else if (name == "app")
+    else if (name == "test_app")
         self->type = ProjectType::LocalApplication;
+	else if (name == "test")
+		self->type = ProjectType::LocalApplication;
     else if (name == "external")
         self->type = ProjectType::ExternalLibrary;
     else if (name == "mono")
@@ -835,6 +899,9 @@ int ProjectStructure::ProjectInfo::ExportProjectType(lua_State* L)
     {
         std::cout << "Project '" << self->mergedName << "' has invalid type: '" << name << "'\n";
     }
+
+    if (name == "test_app")
+        self->hasTests = true;
 
     return 0;
 }
@@ -854,6 +921,28 @@ int ProjectStructure::ProjectInfo::ExportAssignedProjectFile(lua_State* L)
     std::string_view name = luaL_checkstring(L, 1);
     self->assignedProjectFile = name;
 
+    return 0;
+}
+
+int ProjectStructure::ProjectInfo::ExportAppMain(lua_State* L)
+{
+    auto* self = (ProjectInfo*)L->selfPtr;
+    self->appClassName = luaL_checkstring(L, 1);
+    self->appHeaderName = luaL_checkstring(L, 2);
+
+    if (self->appClassName.empty())
+    {
+        std::cout << "Missing app class name\n";
+        self->hasScriptErrors = true;
+    }
+
+    if (self->appHeaderName.empty())
+    {
+        std::cout << "Missing app header name\n";
+        self->hasScriptErrors = true;
+    }
+
+    self->flagGenerateMain = true;
     return 0;
 }
 
@@ -923,6 +1012,12 @@ bool ProjectStructure::ProjectInfo::toggleFlag(std::string_view name, bool value
         flagForceStaticLibrary = value;
         return true;
     }
+    else if (name == "exceptions")
+    {
+        flagAllowExceptions = !value;
+        return true;
+    }
+    
 
     return false;
 }
@@ -972,6 +1067,14 @@ ProjectStructure::FileInfo* ProjectStructure::ProjectInfo::findFileByRelativePat
     if (it != filesMapByRelativePath.end())
         return it->second;
     return nullptr;
+}
+
+void ProjectStructure::ProjectInfo::collectModuleDependencies(ProjectInfo* mp, std::vector<ProjectInfo*>& outAllDependencies)
+{
+    if (!moduleProject || moduleProject == mp)
+        for (auto* dep : resolvedDependencies)
+            if (PushBackUnique(outAllDependencies, dep))
+                dep->collectModuleDependencies(mp, outAllDependencies);
 }
 
 const ProjectStructure::ToolInfo* ProjectStructure::ProjectInfo::findToolByName(std::string_view name) const
@@ -1031,6 +1134,14 @@ int ProjectStructure::ProjectInfo::ExportLinkProject(lua_State* L)
     std::string_view name = luaL_checkstring(L, 1);
     self->addProjectDependency(name);
     return 0;
+}
+
+int ProjectStructure::ProjectInfo::ExportLocalIncludeDir(lua_State* L)
+{
+	auto* self = (ProjectInfo*)L->selfPtr;
+	std::string_view dir = luaL_checkstring(L, 1);
+    self->localIncludeDirectories.push_back(std::string(dir));
+	return 0;
 }
 
 int ProjectStructure::ProjectInfo::ExportLinkOptionalProject(lua_State* L)
@@ -1192,15 +1303,7 @@ void ProjectStructure::addProjectDependency(ProjectInfo* project, std::vector<Pr
 
 bool ProjectStructure::resolveProjectDependency(std::string_view name, std::vector<ProjectInfo*>& outProjects)
 {
-    if (name == "*all_tests*")
-    {
-        for (auto* proj : projects)
-            if (proj->hasTests)
-                addProjectDependency(proj, outProjects);
-
-        return true;
-    }
-    else if (EndsWith(name, "_*"))
+    if (EndsWith(name, "_*"))
     {
         const auto pattern = name.substr(0, name.length() - 1);
         for (auto* proj : projects)
@@ -1243,33 +1346,29 @@ bool ProjectStructure::resolveProjectDependencies(const Configuration& config)
         projects.push_back(rttiGenerator);
     }
 
-    // find the platform project
-    ProjectInfo* platformProject = nullptr;
-    if (config.platform == PlatformType::Windows)
-        platformProject = findProject("platform_windows");
-    else if (config.platform == PlatformType::UWP)
-        platformProject = findProject("platform_uwp");
-    else if (config.platform == PlatformType::Linux)
-        platformProject = findProject("platform_linux");
-    else if (config.platform == PlatformType::Scarlett)
-        platformProject = findProject("platform_scarlett");
-    else if (config.platform == PlatformType::Prospero)
-        platformProject = findProject("platform_prospero");
-
-    if (!platformProject)
+    // create special media generation project
+    ProjectInfo* embeddGenerator = nullptr;
+    if (config.generator == GeneratorType::VisualStudio19 || config.generator == GeneratorType::VisualStudio22)
     {
-        std::cout << "Unable to find matching platform project in the solution\n";
-        return false;
+        embeddGenerator = new ProjectInfo();
+        embeddGenerator->name = "_embedd_files";
+        embeddGenerator->mergedName = "_embedd_files";
+        embeddGenerator->type = ProjectType::EmbeddedMedia;
+        projects.push_back(embeddGenerator);
     }
+
+    // do not continue if modules failed
+    if (!hasValidDeps)
+        return false;
 
     // check and resolve dependencies
     for (auto* proj : projects)
     {
         proj->resolvedDependencies.clear();
 
-        if (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary)
+        if (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary || proj->type == ProjectType::EmbeddedMedia)
         {
-            if (rttiGenerator && !BeginsWith(proj->mergedName, "lib_"))
+            if (rttiGenerator && !BeginsWith(proj->mergedName, "lib_") && (proj != embeddGenerator))
                 proj->resolvedDependencies.push_back(rttiGenerator);
 
             for (const auto& dep : proj->dependencies)
@@ -1291,9 +1390,22 @@ bool ProjectStructure::resolveProjectDependencies(const Configuration& config)
         }
 
         // all applications have explicit dependency on the platform project
-        if (proj->type == ProjectType::LocalApplication)
-            proj->resolvedDependencies.push_back(platformProject);
+        /*if (platformProject && (proj->type == ProjectType::LocalApplication || proj->mergedName == "module_core"))
+            proj->resolvedDependencies.push_back(platformProject);*/
+
+        // add dependency on file embedded
+        if (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary)
+        {
+            if (proj->hasMedia && embeddGenerator)
+                proj->resolvedDependencies.push_back(embeddGenerator);
+            else
+                std::cout << "Project '" << proj->mergedName << "' will not generate media because tool is not avaialble\n";
+        }
     }
+
+    if (embeddGenerator)
+        if (auto* fileEmbedProject = findProject("tool_fxc"))
+            embeddGenerator->resolvedDependencies.push_back(fileEmbedProject);
 
     if (!hasValidDeps)
     {
@@ -1331,6 +1443,113 @@ void ProjectStructure::scanScriptProjects(ProjectGroupType groupType, fs::path r
     scanScriptProjectsAtDir(group, rootScanPath);
 
     std::cout << "Discovered " << group->projects.size() << " project(s)\n";
+}
+
+bool ProjectStructure::makeModules(const Configuration& config)
+{
+    auto oldProjects = std::move(projects);
+    auto oldProjectMap = std::move(projectsMap);
+
+    ProjectGroup* moduleGroup = nullptr;
+
+    for (auto* group : groups)
+    {
+        if (group->type == ProjectGroupType::Engine)
+            moduleGroup = group;
+        group->projects.clear();
+    }
+
+    uint32_t numModules = 0;
+    for (auto* proj : oldProjects)
+    {
+        if (!proj->moduleName.empty())
+        {
+            if (!CheckPlatformFilter(proj->filter, config.platform))
+                continue;
+
+            std::cout << "Project '" << proj->mergedName << "' will be added to module '" << proj->moduleName << "'\n";
+
+            if (proj->type != ProjectType::ExternalLibrary && proj->type != ProjectType::LocalLibrary)
+            {
+                std::cout << "Project '" << proj->mergedName << "' must be a ExternalLibrary or LocalLibrary to be part of a module\n";
+                return false;
+            }
+
+            auto* moduleProject = findProject(proj->moduleName);
+            if (!moduleProject)
+            {
+                moduleProject = new ProjectInfo();
+                moduleProject->name = proj->moduleName;
+                moduleProject->mergedName = proj->moduleName;
+                moduleProject->flagModuleRoot = true;
+                moduleProject->group = moduleGroup;
+                moduleProject->type = ProjectType::LocalLibrary;
+                moduleGroup->projects.push_back(moduleProject);
+
+                projects.push_back(moduleProject);
+                projectsMap[moduleProject->mergedName] = moduleProject;
+
+                numModules += 1;
+            }
+
+            moduleProject->moduleSourceProjects.push_back(proj);
+            proj->moduleProject = moduleProject;
+
+            for (auto* file : proj->files)
+            {
+                if (EndsWith(file->name, "_test.cpp") || EndsWith(file->name, "_tests.cpp"))
+                    continue;
+
+                moduleProject->files.push_back(file);
+            }
+        }
+        else if (proj->type == ProjectType::RttiGenerator)
+        {
+            if (proj->group)
+                PushBackUnique(proj->group->projects, proj);
+            projects.push_back(proj);
+        }
+    }
+
+    for (auto* proj : oldProjects)
+    {
+        if (proj->moduleProject)
+        {
+            std::vector<ProjectInfo*> allDependencies;
+            proj->collectModuleDependencies(proj->moduleProject, allDependencies);
+
+            for (auto* dep : allDependencies)
+            {
+                if (dep->moduleProject && dep->moduleProject != proj->moduleProject)
+                {
+                    PushBackUnique(proj->moduleProject->resolvedDependencies, dep->moduleProject);
+                }
+                else if (dep->type == ProjectType::RttiGenerator || dep->type == ProjectType::ExternalLibrary || BeginsWith(dep->mergedName, "lib_"))
+                {
+                    proj->moduleProject->resolvedDependencies.push_back(dep);
+
+                    if (dep->group)
+                        PushBackUnique(dep->group->projects, dep);
+
+                    if (PushBackUnique(projects, dep))
+                    {
+                        std::cout << "Discovered non-module dependency that has to be kept to '" << dep->mergedName << "'\n";
+                        projectsMap[dep->mergedName] = dep;
+                    }
+                }
+            }
+        }
+    }
+
+    std::cout << "Created " << numModules << " module projects\n";
+
+    if (!numModules)
+    { 
+        std::cout << "No module projects created!\n";
+        return false;
+    }
+
+    return true;
 }
 
 bool ProjectStructure::setupProjects(const Configuration& config)

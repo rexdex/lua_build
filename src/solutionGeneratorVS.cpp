@@ -216,6 +216,16 @@ bool SolutionGeneratorVS::generateProjects()
                 valid &= generateRTTIGenProjectFile(p, file->content);
             }
         }
+        else if (p->originalProject->type == ProjectType::EmbeddedMedia)
+        {
+            {
+                auto projectFilePath = p->projectPath / p->mergedName;
+                projectFilePath += ".vcxproj";
+
+                auto* file = m_gen.createFile(projectFilePath);
+                valid &= generateEmbeddedMediaProjectFile(p, file->content);
+            }
+        }
     }
 
     return true;
@@ -234,6 +244,12 @@ void SolutionGeneratorVS::extractSourceRoots(const ProjectGenerator::GeneratedPr
 
     for (const auto& path : project->additionalIncludePaths)
         outPaths.push_back(path);
+
+    for (const auto& path : project->originalProject->localIncludeDirectories)
+    {
+        const auto fullPath = project->originalProject->rootPath / path;
+        outPaths.push_back(fullPath);
+    }
 }
 
 extern void CollectDefineString(std::vector<std::pair<std::string, std::string>>& ar, std::string_view name, std::string_view value);
@@ -294,6 +310,10 @@ bool SolutionGeneratorVS::generateSourcesProjectFile(const ProjectGenerator::Gen
             if (lib->type == ProjectType::LocalLibrary && lib->flagGlobalInclude)
                     f << (lib->rootPath / "include").u8string() << "\\;";
 
+        for (const auto* source : project->originalProject->moduleSourceProjects)
+            if (source->type == ProjectType::LocalLibrary)
+                f << (source->rootPath / "include").u8string() << "\\;";
+
         for (const auto* lib : project->originalProject->resolvedDependencies)
             if (lib->type == ProjectType::ExternalLibrary)
                 for (const auto& path : lib->libraryInlcudePaths)
@@ -314,8 +334,6 @@ bool SolutionGeneratorVS::generateSourcesProjectFile(const ProjectGenerator::Gen
     else if (project->originalProject->flagWarn3)
         writeln(f, "     <ProjectWarningLevel>Level3</ProjectWarningLevel> ");
 
-    bool isDynamicLib = false;
-    bool isStaticLib = false;
     if (project->originalProject->type == ProjectType::LocalApplication)
     {
         if (project->originalProject->flagConsole)
@@ -331,41 +349,36 @@ bool SolutionGeneratorVS::generateSourcesProjectFile(const ProjectGenerator::Gen
     }
     else if (project->originalProject->type == ProjectType::LocalLibrary)
     {
-        if (project->originalProject->flagForceSharedLibrary)
+        if (project->willBeDLL)
         {
             writeln(f, " 	<ConfigurationType>DynamicLibrary</ConfigurationType>");
-            isDynamicLib = true;
-        }
-        else if (project->originalProject->flagForceStaticLibrary)
-        {
-            writeln(f, " 	<ConfigurationType>StaticLibrary</ConfigurationType>");
-            isStaticLib = true;
         }
         else
         {
-            if (m_buildWithLibs)
-            {
-                writeln(f, " 	<ConfigurationType>StaticLibrary</ConfigurationType>");
-                isStaticLib = true;
-            }
-            else
-            {
-                writeln(f, " 	<ConfigurationType>DynamicLibrary</ConfigurationType>");
-                isDynamicLib = true;
-            }
+            writeln(f, " 	<ConfigurationType>StaticLibrary</ConfigurationType>");
         }
     }
 
     f << " 	<ProjectPreprocessorDefines>$(ProjectPreprocessorDefines);";
 
-    f << ToUpper(project->mergedName) << "_EXPORTS;";
+    if (!m_buildWithLibs)
+    {
+        f << ToUpper(project->mergedName) << "_EXPORTS;";
+        if (project->willBeDLL)
+            f << ToUpper(project->mergedName) << "_DLL;";
+
+        for (const auto* proj : project->originalProject->moduleSourceProjects)
+        {
+            f << ToUpper(proj->mergedName) << "_EXPORTS;";
+            if (proj->flagForceSharedLibrary || m_config.libs == LibraryType::Shared)
+                f << ToUpper(proj->mergedName) << "_DLL;";
+        }
+    }
+
     f << "PROJECT_NAME=" << project->mergedName << ";";
 
     if (project->originalProject->flagConsole)
         f  << "CONSOLE;";
-
-    if (project->hasReflection)
-        f << "BUILD_WITH_REFLECTION;";
 
     if (m_config.build == BuildType::Development)
         f << "BUILD_WITH_DEVTOOLS;";
@@ -376,10 +389,14 @@ bool SolutionGeneratorVS::generateSourcesProjectFile(const ProjectGenerator::Gen
     for (const auto* dep : project->allDependencies)
         f << "HAS_" << ToUpper(dep->mergedName) << ";";
 
-    if (m_buildWithLibs || isStaticLib)
+    for (const auto* dep : project->allDependencies)
+        if (dep->willBeDLL)
+            f << ToUpper(dep->mergedName) << "_DLL;";
+
+    if (m_buildWithLibs || !project->willBeDLL)
         f << "BUILD_AS_LIBS;";
 
-    if (isDynamicLib)
+    if (project->willBeDLL)
         f << "BUILD_DLL;";
     else
         f << "BUILD_LIB;";
@@ -408,6 +425,7 @@ bool SolutionGeneratorVS::generateSourcesProjectFile(const ProjectGenerator::Gen
     writeln(f, "</PropertyGroup>");
 
     writelnf(f, "<Import Project=\"%s\\SharedItemGroups.props\"/>", m_visualStudioScriptsPath.u8string().c_str());
+    writelnf(f, " <Import Project=\"%s\\Shared.targets\"/>", m_visualStudioScriptsPath.u8string().c_str());
 
     /*long numAssemblyFiles = this.files.stream().filter(pf->pf.type == FileType.ASSEMBLY).count();
     if (numAssemblyFiles > 0) {
@@ -469,7 +487,6 @@ bool SolutionGeneratorVS::generateSourcesProjectFile(const ProjectGenerator::Gen
     }
     writeln(f, "</ItemGroup>");
 
-    writelnf(f, " <Import Project=\"%s\\Shared.targets\"/>", m_visualStudioScriptsPath.u8string().c_str());
     writeln(f, " <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.targets\"/>");
 
     /*if (numAssemblyFiles > 0) {
@@ -529,6 +546,24 @@ bool SolutionGeneratorVS::generateSourcesProjectFileEntry(const ProjectGenerator
                     writeln(f, "      <CompileAsWinRT>false</CompileAsWinRT>");
             }
 
+            if (file->originalFile)
+            {
+                const auto relativePath = fs::path(file->originalFile->projectRelativePath).parent_path().u8string();
+                const auto fullPath = (project->outputPath / "obj" / relativePath).make_preferred();
+
+				std::error_code ec;
+				if (!fs::is_directory(fullPath, ec))
+				{
+					if (!fs::create_directories(fullPath, ec))
+					{
+						std::cout << "Failed to create solution directory " << fullPath << "\n";
+						return false;
+					}
+				}
+
+                writelnf(f, "      <ObjectFileName>$(IntDir)\\%s\\</ObjectFileName>", relativePath.c_str());
+            }
+
             writeln(f, "   </ClCompile>");
             break;
         }
@@ -547,20 +582,27 @@ bool SolutionGeneratorVS::generateSourcesProjectFileEntry(const ProjectGenerator
             break;
         }
 
+        case ProjectFileType::MediaFile:
+        case ProjectFileType::MediaScript:
         case ProjectFileType::BuildScript:
         {
             writelnf(f, "   <None Include=\"%s\"/>", file->absolutePath.u8string().c_str());
             break;
         }
 
-        /*case NATVIS: {
-            f.writelnf("   <Content Include=\"%s\">", pf.absolutePath);
-            f.writelnf("      <IncludeInVSIX>true</IncludeInVSIX>");
-            f.writelnf("   </Content>");
+        case ProjectFileType::MediaFileList:
+        {
+            writelnf(f, "   <EmbeddScript Include=\"%s\"/>", file->absolutePath.u8string().c_str());
             break;
         }
 
-        case VSIXMANIFEST:
+        case ProjectFileType::NatVis:
+        {
+            writelnf(f, "   <Natvis Include=\"%s\"/>", file->absolutePath.u8string().c_str());
+            break;
+        }
+
+        /*case VSIXMANIFEST:
         {
             f.writelnf("   <None Include=\"%s\">", pf.absolutePath);
             f.writelnf("      <SubType>Designer</SubType>");
@@ -615,6 +657,12 @@ bool SolutionGeneratorVS::generateSourcesProjectFilters(const ProjectGenerator::
                 case ProjectFileType::CppSource:
                     filterType = "ClCompile";
                     break;
+                case ProjectFileType::MediaFileList:
+                    filterType = "EmbeddScript";
+                    break;
+				case ProjectFileType::NatVis:
+					filterType = "NatVis";
+					break;
             }
 
             if (file->filterPath.empty())
@@ -650,6 +698,80 @@ bool SolutionGeneratorVS::generateSourcesProjectFilters(const ProjectGenerator::
         writeln(f, "</ItemGroup>");
     }
 
+    writeln(f, "</Project>");
+
+    return true;
+}
+
+bool SolutionGeneratorVS::generateEmbeddedMediaProjectFile(const ProjectGenerator::GeneratedProject* project, std::stringstream& f) const
+{
+    writeln(f, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+    writeln(f, "<!-- Auto generated file, please do not edit -->");
+
+    writelnf(f, "<Project DefaultTargets=\"Build\" ToolsVersion=\"%s\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">", m_projectVersion);
+
+    if (m_config.platform == PlatformType::Windows)
+        writelnf(f, "<Import Project=\"%s\\SharedConfigurationSetup.props\"/>", m_visualStudioScriptsPath.u8string().c_str());
+    else if (m_config.platform == PlatformType::UWP)
+        writelnf(f, "<Import Project=\"%s\\SharedConfigurationSetupUWP.props\"/>", m_visualStudioScriptsPath.u8string().c_str());
+    else if (m_config.platform == PlatformType::Prospero)
+        writelnf(f, "<Import Project=\"%s\\SharedConfigurationSetupProspero.props\"/>", m_visualStudioScriptsPath.u8string().c_str());
+    else if (m_config.platform == PlatformType::Scarlett)
+        writelnf(f, "<Import Project=\"%s\\SharedConfigurationSetupScarlett.props\"/>", m_visualStudioScriptsPath.u8string().c_str());
+
+    writeln(f, "<PropertyGroup>");
+    writelnf(f, "  <PlatformToolset>%s</PlatformToolset>", m_toolsetVersion);
+    writelnf(f, "  <VCProjectVersion>%s</VCProjectVersion>", m_projectVersion);
+    writeln(f, "  <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>");
+    writeln(f, "  <ModuleType>Empty</ModuleType>");
+    writeln(f, " <SolutionType>SharedLibraries</SolutionType>");
+    writelnf(f, "  <ProjectGuid>%s</ProjectGuid>", project->assignedVSGuid.c_str());
+    writeln(f, "  <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>");
+    writelnf(f, " 	<ProjectOutputPath>%s\\</ProjectOutputPath>", project->outputPath.u8string().c_str());
+    writelnf(f, " 	<ProjectPublishPath>%s\\</ProjectPublishPath>", m_config.deployPath.u8string().c_str());
+    writeln(f, "</PropertyGroup>");
+    writeln(f, "  <PropertyGroup>");
+    writeln(f, "    <PreBuildEventUseInBuild>true</PreBuildEventUseInBuild>");
+    writeln(f, "  </PropertyGroup>");
+    writeln(f, "  <ItemDefinitionGroup>");
+    writeln(f, "    <PreBuildEvent>");
+
+    auto toolPath = (m_config.deployPath / "tool_fxc.exe").u8string();
+    auto toolPathStr = std::string(toolPath.c_str());
+
+    {
+        std::stringstream cmd;
+        //writelnf(f, "<Error Text=\"No tool to compile embedded media found, was tool_embedd compiled properly?\" Condition=\"!Exists('$%hs')\" />", toolPath.c_str());
+
+        for (const auto* pf : project->files)
+        {
+            if (pf->type == ProjectFileType::MediaFileList)
+            {
+                f << "      <Command>" << toolPath << " pack -input=" << pf->absolutePath.u8string() << "</Command>\n";
+            }
+        }
+    }
+
+    writeln(f, "    </PreBuildEvent>");
+    writeln(f, "  </ItemDefinitionGroup>");
+    writelnf(f, "<Import Project=\"%s\\SharedItemGroups.props\"/>", m_visualStudioScriptsPath.u8string().c_str());
+    writelnf(f, " <Import Project=\"%s\\Shared.targets\"/>", m_visualStudioScriptsPath.u8string().c_str());
+    writeln(f, "  <ItemGroup>");
+    //for (const auto* pf : project->files)
+      //  generateSourcesProjectFileEntry(project, pf, f);
+    writeln(f, "  </ItemGroup>");
+    writeln(f, "  <ItemGroup>");
+    for (const auto* dep : project->directDependencies)
+    {
+        auto projectFilePath = dep->projectPath / dep->mergedName;
+        projectFilePath += ".vcxproj";
+
+        writelnf(f, " <ProjectReference Include=\"%s\">", projectFilePath.u8string().c_str());
+        writelnf(f, "   <Project>%s</Project>", dep->assignedVSGuid.c_str());
+        writeln(f, " </ProjectReference>");
+    }
+    writeln(f, "  </ItemGroup>");
+    writeln(f, " <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.targets\"/>");
     writeln(f, "</Project>");
 
     return true;
@@ -693,15 +815,14 @@ bool SolutionGeneratorVS::generateRTTIGenProjectFile(const ProjectGenerator::Gen
         f << "      <Command>";
         f << m_config.builderExecutablePath.u8string() << " ";
         f << "-tool=reflection ";
-        if (!m_config.engineRootPath.empty())
-            f << "-engineDir=" << m_config.engineRootPath.u8string() << " ";
-        if (!m_config.projectRootPath.empty())
-            f << "-projectDir=" << m_config.projectRootPath.u8string() << " ";
-        f << "-build=" << NameEnumOption(m_config.build) << " ";
+
+        const auto reflectionListPath = project->generatedPath / "rtti_list.txt";
+        f << "-list= \"" << reflectionListPath.u8string() << "\"";
+        /*f << "-build=" << NameEnumOption(m_config.build) << " ";
         f << "-config=" << NameEnumOption(m_config.configuration) << " ";
         f << "-platform=" << NameEnumOption(m_config.platform) << " ";
         f << "-libs=" << NameEnumOption(m_config.libs) << " ";
-        f << "-generator=" << NameEnumOption(m_config.generator) << " ";
+        f << "-generator=" << NameEnumOption(m_config.generator) << " ";*/
         f << "</Command>\n";
     }
 

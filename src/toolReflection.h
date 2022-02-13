@@ -6,14 +6,13 @@
 
 //--
 
-struct ProjectGenerator;
+struct FileGenerator;
 
 struct ProjectReflection
 {
     struct RefelctionFile
     {
-        const ProjectStructure::FileInfo* file = nullptr;
-
+        fs::path absoluitePath;
         CodeTokenizer tokenized;
     };
 
@@ -30,10 +29,10 @@ struct ProjectReflection
 
     ~ProjectReflection();
 
-    bool extract(const ProjectStructure& structure, const Configuration& config);
+    bool extract(const fs::path& fileList);
     bool tokenizeFiles();
     bool parseDeclarations();
-    bool generateReflection(ProjectGenerator& gen) const;
+    bool generateReflection(FileGenerator& files) const;
 
 private:
     bool generateReflectionForProject(const RefelctionProject& p, std::stringstream& f) const;
@@ -48,7 +47,5 @@ public:
 
     int run(const char* argv0, const Commandline& cmdline);
 };
-
-extern bool GenerateInlinedReflection(const Configuration& config, ProjectStructure& structure, ProjectGenerator& codeGenerator);
 
 //--

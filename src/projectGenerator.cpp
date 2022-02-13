@@ -137,7 +137,7 @@ bool ProjectGenerator::extractProjects(const ProjectStructure& structure)
     // create projects
     for (const auto* proj : structure.projects)
     {
-        if (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary || proj->type == ProjectType::RttiGenerator)
+        if (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary || proj->type == ProjectType::RttiGenerator || proj->type == ProjectType::EmbeddedMedia)
         {
             // do not include dev-only project in standalone builds
             if (config.build != BuildType::Development)
@@ -159,6 +159,7 @@ bool ProjectGenerator::extractProjects(const ProjectStructure& structure)
             generatorProject->generatedPath = config.solutionPath / "generated" / proj->mergedName;
             generatorProject->projectPath = config.solutionPath / "projects" / proj->mergedName;
             generatorProject->outputPath = config.solutionPath / "output" / proj->mergedName;
+            generatorProject->hasEmbeddedFiles = proj->hasMedia;
 
             projects.push_back(generatorProject);
             projectsMap[proj] = generatorProject;
@@ -188,11 +189,38 @@ bool ProjectGenerator::extractProjects(const ProjectStructure& structure)
             }
 
             // add project to group
-            generatorProject->group = createGroup(proj->type == ProjectType::RttiGenerator ? "" : PartBefore(proj->mergedName, "_"));
+            bool fullProject = (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary);
+            generatorProject->group = createGroup(fullProject ? PartBefore(proj->mergedName, "_") : "");
             generatorProject->group->projects.push_back(generatorProject);
 
             // determine project guid
             generatorProject->assignedVSGuid = GuidFromText(generatorProject->mergedName);
+
+            // determine if this project will be a DLL
+            if (proj->type == ProjectType::LocalLibrary)
+            {
+                if (proj->flagForceSharedLibrary)
+                    generatorProject->willBeDLL = true;
+                else if (proj->flagForceStaticLibrary)
+                    generatorProject->willBeDLL = false;
+                else
+                    generatorProject->willBeDLL = (config.libs == LibraryType::Shared);
+
+                if (config.libs == LibraryType::Shared)
+                    generatorProject->willBeLinked = generatorProject->willBeDLL;
+                else
+                    generatorProject->willBeLinked = true;
+            }
+            else
+            {
+                generatorProject->willBeDLL = false;
+
+                if (proj->type == ProjectType::LocalApplication)
+                {
+                    generatorProject->willBeLinked = true;
+                    generatorProject->willHaveEntryPoint = true;
+                }
+            }
         }
 
         // create script projects
@@ -270,12 +298,12 @@ bool ProjectGenerator::extractProjects(const ProjectStructure& structure)
     // determine what should be generated
     for (auto* proj : projects)
     {
-        proj->localGlueHeader = sharedGlueFolder / proj->mergedName;
-        proj->localGlueHeader += "_glue.inl";
-
-        const auto publicHeader = proj->originalProject->rootPath / "include/public.h";
-        if (fs::is_regular_file(publicHeader))
-            proj->localPublicHeader = publicHeader;
+        if (!proj->originalProject->flagModuleRoot)
+        {
+            const auto publicHeader = proj->originalProject->rootPath / "include/public.h";
+            if (fs::is_regular_file(publicHeader))
+                proj->localPublicHeader = publicHeader;
+        }
     }
 
     // extract base include directories (source code roots)
@@ -291,8 +319,13 @@ bool ProjectGenerator::generateAutomaticCode()
 {
     bool valid = true;
 
+	for (auto* proj : projects)
+        if (proj->mergedName != "_rtti_gen")
+		    valid &= generateAutomaticCodeForProject(proj);
+
     for (auto* proj : projects)
-        valid &= generateAutomaticCodeForProject(proj);
+        if (proj->mergedName == "_rtti_gen")
+            valid &= generateAutomaticCodeForProject(proj);
 
     return valid;
 }
@@ -311,47 +344,15 @@ bool ProjectGenerator::generateAutomaticCodeForProject(GeneratedProject* project
 {
     bool valid = true;
 
-    if (!project->localGlueHeader.empty())
-    {
-        auto* info = new GeneratedProjectFile;
-        info->absolutePath = project->localGlueHeader;
-        info->type = ProjectFileType::CppHeader;
-        info->filterPath = "_generated";
-        info->name = project->mergedName + "_glue.inl";
-        info->generatedFile = createFile(info->absolutePath);
-        project->files.push_back(info);
-
-        valid &= generateProjectGlueFile(project, info->generatedFile->content);
-    }
-
     if (project->originalProject->type == ProjectType::LocalApplication || project->originalProject->type == ProjectType::LocalLibrary)
     {
-        auto* info = new GeneratedProjectFile;
-        info->absolutePath = project->generatedPath / "static_init.inl";
-        info->type = ProjectFileType::CppHeader;
-        info->filterPath = "_generated";
-        info->name = "main.cpp";
-        info->generatedFile = createFile(info->absolutePath);
-        project->files.push_back(info);
-
-        valid &= generateProjectStaticInitFile(project, info->generatedFile->content);
-    }
-
-    if (project->originalProject->type == ProjectType::LocalApplication || project->originalProject->type == ProjectType::LocalLibrary)
-    {
-        auto reflectionFilePath = project->generatedPath / "reflection.cpp";
-
-        try
-        {
-            //fs::remove(reflectionFilePath);
-        }
-        catch (...)
-        {
-        }
-
         bool needsReflection = false;
 
-        if (project->mergedName == "core_object")
+        if (project->originalProject->flagModuleRoot)
+        {
+            needsReflection = true;
+        }
+        else if (project->mergedName == "core_object")
         {
             needsReflection = true;
         }
@@ -369,6 +370,8 @@ bool ProjectGenerator::generateAutomaticCodeForProject(GeneratedProject* project
 
         if (needsReflection)
         {
+			auto reflectionFilePath = project->generatedPath / "reflection.cpp";
+
             auto* info = new GeneratedProjectFile;
             info->type = ProjectFileType::CppSource;
             info->absolutePath = reflectionFilePath;
@@ -377,12 +380,153 @@ bool ProjectGenerator::generateAutomaticCodeForProject(GeneratedProject* project
             project->files.push_back(info);
 
             project->hasReflection = true;
+            project->localReflectionFile = reflectionFilePath;
 
-            // DO NOT WRITE
+            // DO NOT WRITE as it's written by the reflection tool
             //info->generatedFile = createFile(info->absolutePath);
             //valid &= generateProjectDefaultReflection(project, info->generatedFile->content);
         }
     }
+
+    if (project->originalProject->type == ProjectType::LocalLibrary)
+    {
+        if (project->originalProject->flagModuleRoot)
+        {
+            for (const auto* sourceProject : project->originalProject->moduleSourceProjects)
+            {
+                auto localGlueHeader = sharedGlueFolder / sourceProject->mergedName;
+                localGlueHeader += "_glue.inl";
+
+                auto* info = new GeneratedProjectFile;
+                info->absolutePath = localGlueHeader;
+                info->type = ProjectFileType::CppHeader;
+                info->filterPath = "_generated";
+                info->name = project->mergedName + "_glue.inl";
+                info->generatedFile = createFile(info->absolutePath);
+                project->files.push_back(info);
+
+                valid &= generateProjectModuleGlueFile(project, sourceProject, info->generatedFile->content);
+            }
+        }
+        else
+        {
+            auto localGlueHeader = sharedGlueFolder / project->mergedName;
+            localGlueHeader += "_glue.inl";
+
+            auto* info = new GeneratedProjectFile;
+            info->absolutePath = localGlueHeader;
+            info->type = ProjectFileType::CppHeader;
+            info->filterPath = "_generated";
+            info->name = project->mergedName + "_glue.inl";
+            info->generatedFile = createFile(info->absolutePath);
+            project->files.push_back(info);
+
+            valid &= generateProjectGlueFile(project, info->generatedFile->content);
+        }
+    }
+
+    if (project->originalProject->type == ProjectType::LocalApplication || project->originalProject->type == ProjectType::LocalLibrary)
+    {
+        auto* info = new GeneratedProjectFile;
+        info->absolutePath = project->generatedPath / "static_init.inl";
+        info->type = ProjectFileType::CppHeader;
+        info->filterPath = "_generated";
+        info->name = "main.cpp";
+        info->generatedFile = createFile(info->absolutePath);
+        project->files.push_back(info);
+
+        valid &= generateProjectStaticInitFile(project, info->generatedFile->content);
+    }
+
+    if (project->originalProject->type == ProjectType::LocalApplication || project->originalProject->type == ProjectType::LocalLibrary)
+    {
+        if (project->originalProject->flagUsePCH)
+        {
+            {
+                auto* info = new GeneratedProjectFile;
+                info->absolutePath = project->generatedPath / "build.h";
+                info->type = ProjectFileType::CppHeader;
+                info->filterPath = "_generated";
+                info->name = "build.h";
+                info->generatedFile = createFile(info->absolutePath);
+                project->files.push_back(info);
+
+                valid &= generateProjectBuildHeaderFile(project, info->generatedFile->content);
+            }
+
+            {
+                auto* info = new GeneratedProjectFile;
+                info->absolutePath = project->generatedPath / "build.cpp";
+                info->type = ProjectFileType::CppSource;
+                info->filterPath = "_generated";
+                info->name = "build.cpp";
+                info->generatedFile = createFile(info->absolutePath);
+                project->files.push_back(info);
+
+                valid &= generateProjectBuildSourceFile(project, info->generatedFile->content);
+            }
+        }
+    }
+
+    if (project->originalProject->type == ProjectType::LocalApplication)
+    {
+        if (project->originalProject->flagGenerateMain || project->originalProject->hasTests)
+        {
+            auto* info = new GeneratedProjectFile;
+            info->absolutePath = project->generatedPath / "main.cpp";
+            info->type = ProjectFileType::CppSource;
+            info->filterPath = "_generated";
+            info->name = "main.cpp";
+            info->generatedFile = createFile(info->absolutePath);
+            project->files.push_back(info);
+
+            valid &= generateProjectMainSourceFile(project, info->generatedFile->content);            
+        }
+    }
+
+    if (project->originalProject->type == ProjectType::EmbeddedMedia)
+    {
+        auto* info = new GeneratedProjectFile;
+        info->absolutePath = project->generatedPath / "media_list.txt";
+        info->type = ProjectFileType::MediaFileList;
+        info->filterPath = "_generated";
+        info->name = "media_list.txt";
+        info->generatedFile = createFile(info->absolutePath);
+        project->files.push_back(info);
+
+        valid &= generateSolutionEmbeddFileList(info->generatedFile->content);
+    }
+
+	if (project->originalProject->type == ProjectType::RttiGenerator)
+	{
+		auto* info = new GeneratedProjectFile;
+		info->absolutePath = project->generatedPath / "rtti_list.txt";
+		info->type = ProjectFileType::RTTIList;
+		info->filterPath = "_generated";
+		info->name = "rtti_list.txt";
+		info->generatedFile = createFile(info->absolutePath);
+		project->files.push_back(info);
+
+		valid &= generateSolutionReflectionFileList(info->generatedFile->content);
+	}
+
+    if (project->originalProject->type == ProjectType::LocalApplication || project->originalProject->type == ProjectType::LocalLibrary)
+    {
+        for (const auto* file : project->originalProject->files)
+        {
+            if (file->type == ProjectFileType::MediaScript)
+            {
+                std::string compiledMediaFile = std::string("EmbeddedMedia_") + file->originalProject->mergedName + "_" + std::string(PartBefore(file->name, ".")) + "_data.cpp";
+
+                auto* info = new GeneratedProjectFile;
+                info->absolutePath = project->generatedPath / compiledMediaFile;
+                info->type = ProjectFileType::CppSource;
+                info->filterPath = "_generated";
+                info->name = compiledMediaFile;
+                project->files.push_back(info);
+            }
+        }
+    }    
 
     for (const auto& externalIncludePath : project->originalProject->externalIncludePaths)
     {
@@ -458,16 +602,54 @@ bool ProjectGenerator::generateExtraCodeForProject(GeneratedProject* project)
     return valid;
 }
 
-bool ProjectGenerator::shouldStaticLinkProject(const GeneratedProject* project) const
+bool ProjectGenerator::generateProjectModuleGlueFile(const GeneratedProject* project, const ProjectStructure::ProjectInfo* sourceProject, std::stringstream& f)
 {
-    if (project->originalProject->flagForceStaticLibrary)
-        return true;
-    else if (project->originalProject->flagForceSharedLibrary)
-        return false;
-    else
-        return (config.libs == LibraryType::Static);
+    auto macroName = ToUpper(sourceProject->mergedName) + "_GLUE";
+    auto apiName = ToUpper(sourceProject->mergedName) + "_API";
+    auto exportsMacroName = ToUpper(project->mergedName) + "_EXPORTS";
 
-    return false;
+    writeln(f, "/***");
+    writeln(f, "* Inferno Engine Glue Code");
+    writeln(f, "* Build system source code licensed under MIP license");
+    writeln(f, "* Auto generated, do not modify");
+    writeln(f, "***/");
+    writeln(f, "");    writeln(f, "");
+    writeln(f, "#ifndef " + macroName);
+    writeln(f, "#define " + macroName);
+    writeln(f, "");
+
+    if (!project->willBeDLL)
+    {
+        writeln(f, "#define " + apiName);
+    }
+    else
+    {
+        writeln(f, "  #ifdef " + exportsMacroName);
+        writelnf(f, "    #define %s __declspec( dllexport )", apiName.c_str());
+        writeln(f, "  #else");
+        writelnf(f, "    #define %s __declspec( dllimport )", apiName.c_str());
+        writeln(f, "  #endif");
+    }
+
+    if (!sourceProject->resolvedDependencies.empty())
+    {
+        writeln(f, "");
+        writeln(f, "// Public header from project dependencies:");
+
+        for (const auto* dep : sourceProject->resolvedDependencies)
+        {
+            if (dep->moduleProject != nullptr)//project->originalProject)
+            {
+                const auto publicHeader = dep->rootPath / "include/public.h";
+                if (fs::is_regular_file(publicHeader))
+                    writeln(f, "#include \"" + publicHeader.u8string() + "\"");
+            }
+        }
+    }
+
+    writeln(f, "#endif");
+
+    return true;
 }
 
 bool ProjectGenerator::generateProjectGlueFile(const GeneratedProject* project, std::stringstream& f)
@@ -486,7 +668,7 @@ bool ProjectGenerator::generateProjectGlueFile(const GeneratedProject* project, 
     writeln(f, "#define " + macroName);
     writeln(f, "");
 
-    if (shouldStaticLinkProject(project))
+    if (!project->willBeDLL)
     {
         writeln(f, "#define " + apiName);
     }
@@ -522,7 +704,207 @@ bool ProjectGenerator::generateProjectDefaultReflection(const GeneratedProject* 
     writeln(f, "/// AUTOGENERATED FILE - ALL EDITS WILL BE LOST");
     return true;
 }
-        
+
+bool ProjectGenerator::generateProjectMainSourceFile(const GeneratedProject* project, std::stringstream& f)
+{
+    writeln(f, "/***");
+    writeln(f, "* Inferno Engine Static Lib Initialization Code");
+    writeln(f, "* Auto generated, do not modify");
+    writeln(f, "* Build system source code licensed under MIP license");
+    writeln(f, "***/");
+    writeln(f, "");
+
+    writeln(f, "#include \"build.h\"");
+
+    if (!project->originalProject->appHeaderName.empty())
+        writelnf(f, "#include \"%hs\"", project->originalProject->appHeaderName.c_str());
+    writelnf(f, "#include \"core/containers/include/commandLine.h\"");
+    writeln(f, "");
+
+    if (project->originalProject->hasTests)
+    {
+        writeln(f, "#include \"gtest/gtest.h\"");
+        writeln(f, "");
+    }
+
+    bool windowsCommandLine = false;
+    if (config.platform == PlatformType::Windows)
+    {
+        if (project->originalProject->flagConsole)
+        {
+            writeln(f, "int main(int argc, char** argv) {");
+        }
+        else
+        {
+            writeln(f, "#include <Windows.h>");
+            writeln(f, "");
+            writeln(f, "int __stdcall wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {");
+            windowsCommandLine = true;
+        }
+    }
+    else
+    {
+        writeln(f, "int main(int argc, char** argv) {");
+    }
+
+    writeln(f, "  extern void InitializeStaticDependencies();");
+    writeln(f, "  InitializeStaticDependencies();");
+    writeln(f, "");
+    writeln(f, "  inferno::CommandLine commandLine;");
+    if (windowsCommandLine)
+        writeln(f, "  if (!commandLine.parse(inferno::BaseStringView<wchar_t>(pCmdLine), false))");
+    else
+        writeln(f, "  if (!commandLine.parse(argc, argv))");
+    writeln(f, "    return -1;");
+    writeln(f, "");
+
+    if (project->originalProject->hasTests)
+    {
+        writeln(f, "  if (!commandLine.hasParam(\"interactive\")) {");
+        writeln(f, "    #ifdef PLATFORM_LINUX");
+        writeln(f, "      signal(SIGPIPE, SIG_IGN);");
+        writeln(f, "    #endif");
+		writeln(f, "");
+        writeln(f, "    testing::InitGoogleTest(&argc, argv);");
+        writeln(f, "    auto ret = RUN_ALL_TESTS();");
+        writeln(f, "    if (ret) return ret;");
+        writeln(f, "  }");
+        writeln(f, "");
+    }
+
+    if (!project->originalProject->appClassName.empty())
+    {
+        writelnf(f, "  %hs app;", project->originalProject->appClassName.c_str());
+        writelnf(f, "  if (!app.init(commandLine))");
+        writelnf(f, "    return -1;");
+        writeln(f, "");
+
+        writeln(f, "  while (app.update()) {}");
+        writeln(f, "");
+    }
+
+    writeln(f, "  return 0;");
+    writeln(f, "}");
+
+    return true;
+}
+
+bool ProjectGenerator::generateProjectBuildSourceFile(const GeneratedProject* project, std::stringstream& f)
+{
+    writeln(f, "/***");
+    writeln(f, "* Inferno Engine Static Lib Initialization Code");
+    writeln(f, "* Auto generated, do not modify");
+    writeln(f, "* Build system source code licensed under MIP license");
+    writeln(f, "***/");
+    writeln(f, "");
+
+    writeln(f, "#include \"build.h\"");
+    writeln(f, "#include \"static_init.inl\"");
+    writeln(f, "");
+
+    if (project->hasReflection)
+    {
+        writelnf(f, "extern void InitializeReflection_%hs();", project->mergedName.c_str());
+        writelnf(f, "extern void InitializeTests_%hs();", project->mergedName.c_str());
+        writeln(f, "");
+    }
+
+    if (project->hasEmbeddedFiles)
+    {
+        writelnf(f, "void InitializeEmbeddedFiles_%hs() {", project->mergedName.c_str());
+        for (const auto* file : project->originalProject->files)
+        {
+            if (file->type == ProjectFileType::MediaScript && file->originalProject)
+            {
+                std::string symbolName = ToUpper(file->originalProject->mergedName) + "_" + ToUpper(PartBefore(file->name, "."));
+                std::string functionName = "RegisterEmbeddedFiles_" + symbolName;
+                writelnf(f, "  extern void %hs();", functionName.c_str());
+                writelnf(f, "  %hs();", functionName.c_str());
+            }
+        }
+        writeln(f, "}");
+        writeln(f, "");
+    }
+
+    writelnf(f, "void InitModule_%hs() {", project->mergedName.c_str());
+    if (project->hasReflection && project->hasEmbeddedFiles)
+        writelnf(f, "inferno::modules::TModuleInitializationFunc initFunc = []() { InitializeReflection_%hs(); InitializeTests_%hs(); InitializeEmbeddedFiles_%hs(); };", project->mergedName.c_str(), project->mergedName.c_str(), project->mergedName.c_str());
+    else if (project->hasReflection)
+        writelnf(f, "inferno::modules::TModuleInitializationFunc initFunc = []() { InitializeReflection_%hs(); InitializeTests_%hs(); };", project->mergedName.c_str(), project->mergedName.c_str());
+    else if (project->hasEmbeddedFiles)
+        writelnf(f, "inferno::modules::TModuleInitializationFunc initFunc = []() { InitializeEmbeddedFiles_%hs(); };", project->mergedName.c_str());
+    else
+        writelnf(f, "inferno::modules::TModuleInitializationFunc initFunc = []() { };");
+    writelnf(f, "inferno::modules::RegisterModule(\"%hs\", __DATE__, __TIME__, _MSC_FULL_VER, initFunc);", project->mergedName.c_str());
+    writeln(f, "}");
+    writeln(f, "");
+
+    if (project->willBeDLL)
+    {
+        writeln(f, "void* GModuleHandle = nullptr;");
+        writeln(f, "unsigned char __stdcall DllMain(void* moduleInstance, unsigned long nReason, void*) {");
+        writelnf(f, "if (nReason == 1) { GModuleHandle = moduleInstance; InitModule_%hs(); }", project->mergedName.c_str());
+        writeln(f, "return 1;");
+        writeln(f, "}");
+        writeln(f, "");
+    }
+
+    return true;
+}
+
+bool ProjectGenerator::generateProjectBuildHeaderFile(const GeneratedProject* project, std::stringstream& f)
+{
+    writeln(f, "/***");
+    writeln(f, "* Inferno Engine Static Lib Initialization Code");
+    writeln(f, "* Auto generated, do not modify");
+    writeln(f, "* Build system source code licensed under MIP license");
+    writeln(f, "***/");
+    writeln(f, "");
+    writeln(f, "#pragma once");
+    writeln(f, "");
+
+    if (project->originalProject->hasTests)
+    {
+        writeln(f, "#define WITH_GTEST");
+        writeln(f, "");
+    }
+
+    if (project->originalProject && project->originalProject->type == ProjectType::LocalApplication && !project->allDependencies.empty())
+    {
+        writeln(f, "");
+        writeln(f, "// Public header from project dependencies:");
+
+        for (const auto* dep : project->allDependencies)
+        {
+            if (dep->originalProject->type == ProjectType::LocalLibrary)
+            {
+                if (dep->originalProject->flagModuleRoot || config.build != BuildType::Standalone)
+                {
+                    const auto publicHeader = dep->originalProject->rootPath / "include/public.h";
+                    if (fs::is_regular_file(publicHeader))
+                        writeln(f, "#include \"" + publicHeader.u8string() + "\"");
+                }
+            }
+        }
+    }
+
+    for (const auto* file : project->files)
+        if (file->name == "public.h")
+            writeln(f, "#include \"" + file->absolutePath.u8string() + "\"");
+
+    if (project->originalProject->hasTests)
+    {
+        writeln(f, "");
+        writeln(f, "#include \"gtest/gtest.h\"");
+    }
+
+    /*for (const auto* file : project->files)
+        if (file->name == "private.h")
+            writeln(f, "#include \"" + file->absolutePath.u8string() + "\"");*/
+
+    return true;
+}
+
 bool ProjectGenerator::projectRequiresStaticInit(const GeneratedProject* project) const
 {
     if (project->originalProject->flagNoInit)
@@ -552,10 +934,9 @@ bool ProjectGenerator::generateProjectStaticInitFile(const GeneratedProject* pro
 
     // determine if project requires static initialization (the apps and console apps require that)
     // then pull in the library linkage, for apps we pull much more crap
-    const bool staticLink = shouldStaticLinkProject(project);
     if (config.generator == GeneratorType::VisualStudio19 || config.generator == GeneratorType::VisualStudio22)
     {
-        if (!staticLink)
+        if (project->willBeLinked)
         {
             for (const auto* dep : project->originalProject->resolvedDependencies)
             {
@@ -596,43 +977,41 @@ bool ProjectGenerator::generateProjectStaticInitFile(const GeneratedProject* pro
     }
 
     // static initialization part is only generated for apps
-    if (project->originalProject->type == ProjectType::LocalApplication)
+    if (project->willHaveEntryPoint)
     {
-        writeln(f, "void InitializeStaticDependencies(void* instance)");
-        writeln(f, "{");
+        if (config.platform == PlatformType::Windows)
+            writeln(f, "#include <Windows.h>\n\n");
+
+        writeln(f, "void* GModuleHandle = nullptr;");
+
+        writeln(f, "void InitializeStaticDependencies() {");
+
+        if (config.platform == PlatformType::Windows)
+            writeln(f, "    GModuleHandle = (void*)GetModuleHandle(NULL);");
 
         if (!project->allDependencies.empty())
         {
-            if (staticLink)
+            // if we build based on static libraries we need to "touch" the initialization code from other modules
+            for (const auto* dep : project->allDependencies)
             {
-                // if we build based on static libraries we need to "touch" the initialization code from other modules
-                for (const auto* dep : project->allDependencies)
+                if (projectRequiresStaticInit(dep) && dep->willBeLinked)
                 {
-                    if (projectRequiresStaticInit(dep))
-                    {
-                        writelnf(f, "    extern void InitModule_%s(void*);", dep->mergedName.c_str());
-                        writelnf(f, "    InitModule_%s(instance);", dep->mergedName.c_str());
-                    }
-                };
-            }
-            else
-            {
-                // if we are build based on dynamic libs (dlls)
-                // make sure that they are loaded on time
-                // THIS IS TEMPORARY UNTIL WE DO A PROPER CLASS LOADER
-                for (const auto* dep : project->allDependencies)
-                {
-                    if (dep->originalProject->type == ProjectType::LocalLibrary && !dep->originalProject->flagPureDynamicLibrary && !dep->originalProject->flagForceStaticLibrary)
+                    if (dep->willBeDLL)
                     {
                         writelnf(f, "    inferno::modules::LoadDynamicModule(\"%s\");", dep->mergedName.c_str());
+                    }
+                    else
+                    {
+                        writelnf(f, "    extern void InitModule_%s();", dep->mergedName.c_str());
+                        writelnf(f, "    InitModule_%s();", dep->mergedName.c_str());
                     }
                 }
             }
         }
 
         // initialize ourselves
-        writelnf(f, "    extern void InitModule_%s(void*);", project->mergedName.c_str());
-        writelnf(f, "    InitModule_%s(instance);", project->mergedName.c_str());
+        writelnf(f, "    extern void InitModule_%s();", project->mergedName.c_str());
+        writelnf(f, "    InitModule_%s();", project->mergedName.c_str());
 
         // initialize all module data
         writelnf(f, "    inferno::modules::InitializePendingModules();");
@@ -641,6 +1020,72 @@ bool ProjectGenerator::generateProjectStaticInitFile(const GeneratedProject* pro
     }
 
     return true;
+}
+
+bool ProjectGenerator::generateSolutionReflectionFileList(std::stringstream& f)
+{
+    writeln(f, NameEnumOption(config.platform));
+    writeln(f, NameEnumOption(config.build));
+
+    uint32_t numReflectedFiles = 0;
+    uint32_t numTotalFiles = 0;
+    for (const auto* proj : projects)
+    {
+        if (!proj->originalProject)
+            continue;
+
+        numTotalFiles += (uint32_t)proj->files.size();
+
+        if (proj->hasReflection)
+        {
+            writelnf(f, "PROJECT");
+            writelnf(f, "%hs", proj->mergedName.c_str());
+            writelnf(f, "%hs", proj->localReflectionFile.u8string().c_str());
+
+            for (const auto* file : proj->files)
+            {
+                if (file->type == ProjectFileType::CppSource)
+                {
+                    writelnf(f, "%hs", file->absolutePath.u8string().c_str());
+                    numReflectedFiles += 1;
+                }
+            }
+        }
+    }
+
+    std::cout << "Found " << numReflectedFiles << " source code files for reflection of (" << numTotalFiles << " total)\n";
+    return true;
+}
+
+bool ProjectGenerator::generateSolutionEmbeddFileList(std::stringstream& f)
+{
+	writeln(f, NameEnumOption(config.platform));
+
+	uint32_t numMediaFiles = 0;
+	for (const auto* proj : projects)
+	{
+		if (!proj->hasEmbeddedFiles)
+			continue;
+
+		for (const auto* file : proj->files)
+		{
+			if (file->type == ProjectFileType::MediaScript)
+			{
+				writelnf(f, "%hs", proj->mergedName.c_str());
+
+				writelnf(f, "%hs", file->absolutePath.u8string().c_str());
+
+				const auto compiledMediaFileName = std::string("EmbeddedMedia_") + proj->mergedName + "_" + std::string(PartBefore(file->name, ".")) + "_data.cpp";
+				const auto compiledMediaFilePath = proj->generatedPath / compiledMediaFileName;
+				writelnf(f, "%hs", compiledMediaFilePath.u8string().c_str());
+
+				numMediaFiles += 1;
+			}
+		}
+	}
+
+	std::cout << "Found " << numMediaFiles << " embedded media build files\n";
+	return true;
 }
 
 //--
@@ -675,7 +1120,7 @@ bool ProjectGenerator::processBisonFile(GeneratedProject* project, const Generat
         {
             if (!fs::create_directories(project->generatedPath, ec))
             {
-                std::cout << "BISON tool failed because output directory can't be created\n";
+                std::cout << "BISON tool failed because output directory \"" << project->generatedPath << "\" can't be created: " << ec << "\n";
                 return false;
             }
         }
@@ -701,6 +1146,14 @@ bool ProjectGenerator::processBisonFile(GeneratedProject* project, const Generat
             std::cout << "BISON tool failed with exit code " << code << "\n";
             return false;
         }
+        else
+        {
+            std::cout << "BISON tool finished and generated '" << parserFile << "'\n";
+        }
+    }
+    else
+    {
+        std::cout << "BISON tool skipped because '" << parserFile << "' is up to date\n";
     }
 
     {

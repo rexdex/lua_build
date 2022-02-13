@@ -3,6 +3,12 @@
 #include <cwctype>
 #include <fstream>
 #include <sstream>
+#include <string.h>
+
+#ifndef _WIN32
+#define vsprintf_s(x, size, txt, args) vsprintf(x, txt, args)
+#define sprintf_s(x, size, txt, ...) sprintf(x, txt, __VA_ARGS__)
+#endif
 
 //--
 
@@ -1139,6 +1145,7 @@ std::string_view NameEnumOption(BuildType type)
     switch (type)
     {
     case BuildType::Development: return "dev";
+    case BuildType::Standalone: return "standalone";
     case BuildType::Shipment: return "ship";
     }
     return "";

@@ -176,14 +176,20 @@ bool SolutionGeneratorCMAKE::generateProjectFile(const ProjectGenerator::Generat
     writelnf(f, "set(CMAKE_EXE_LINKER_FLAGS_CHECKED \"${CMAKE_EXE_LINKER_FLAGS_RELEASE}\")");
     writelnf(f, "set(CMAKE_SHARED_LINKER_FLAGS_CHECKED \"${CMAKE_SHARED_LINKER_FLAGS_CHECKED}\")");
 
+    if (m_config.platform == PlatformType::Windows) {
+        writeln(f, "set( CMAKE_CXX_FLAGS  \"${CMAKE_CXX_FLAGS} /MP\")");
+    } else if (m_config.platform == PlatformType::Linux) {
+      
+    }
+
     if (m_config.configuration == ConfigurationType::Debug)
-        writeln(f, "set( CMAKE_CXX_FLAGS  \"${CMAKE_CXX_FLAGS} /MP -DBUILD_DEBUG -D_DEBUG -DDEBUG\")");
+        writeln(f, "set( CMAKE_CXX_FLAGS  \"${CMAKE_CXX_FLAGS} -DBUILD_DEBUG -D_DEBUG -DDEBUG\")");
     else if (m_config.configuration == ConfigurationType::Checked)
-        writeln(f, "set( CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} /MP -DBUILD_CHECKED -DNDEBUG\")");
+        writeln(f, "set( CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -DBUILD_CHECKED -DNDEBUG\")");
     else if (m_config.configuration == ConfigurationType::Release)
-        writeln(f, "set( CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} /MP -DBUILD_RELEASE -DNDEBUG\")");
+        writeln(f, "set( CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -DBUILD_RELEASE -DNDEBUG\")");
     else if (m_config.configuration == ConfigurationType::Final)
-        writeln(f, "set( CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} /MP -DBUILD_RELEASE -DBUILD_FINAL -DNDEBUG\")");
+        writeln(f, "set( CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -DBUILD_RELEASE -DBUILD_FINAL -DNDEBUG\")");
 
     if (windowsPlatform)
     {
@@ -198,7 +204,12 @@ bool SolutionGeneratorCMAKE::generateProjectFile(const ProjectGenerator::Generat
     }
     else
     {
-        writeln(f, "set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -pthread -fno-exceptions\")");
+        writeln(f, "set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -pthread\")");
+
+        if (p->originalProject->flagAllowExceptions)
+            writeln(f, "set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -fexceptions\")");
+        else
+            writeln(f, "set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -fno-exceptions\")");
 
         writeln(f, "set(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS} -g\")");
 
@@ -233,6 +244,12 @@ bool SolutionGeneratorCMAKE::generateProjectFile(const ProjectGenerator::Generat
 
             for (const auto& path : lib->libraryLinkFile)
                 writelnf(f, "link_libraries(%s)", EscapePath(path).c_str());
+        }
+
+        else if (lib->type == ProjectType::LocalLibrary && lib->flagGlobalInclude)
+        {
+            const auto path = lib->rootPath / "include";
+            writelnf(f, "include_directories(%s)", EscapePath(path).c_str());
         }
     }
     writeln(f, "");
@@ -282,13 +299,23 @@ bool SolutionGeneratorCMAKE::generateProjectFile(const ProjectGenerator::Generat
     writeln(f, "# Project dependencies");
     if (p->originalProject->type == ProjectType::LocalApplication)
     {
-        for (const auto* dep : p->allDependencies)
+        auto reversedDeps = p->allDependencies;
+        std::reverse(reversedDeps.begin(), reversedDeps.end());
+
+        const auto& deps = windowsPlatform ? p->allDependencies : reversedDeps;
+        for (const auto* dep : deps)
             if (!dep->originalProject->flagPureDynamicLibrary)
                 writelnf(f, "target_link_libraries(%s %s)", p->mergedName.c_str(), dep->mergedName.c_str());
     }
     else if (!staticLink)
     {
-        for (const auto* dep : p->directDependencies)
+        auto reversedDeps = p->directDependencies;
+        std::reverse(reversedDeps.begin(), reversedDeps.end());
+
+        const auto& deps = windowsPlatform ? p->directDependencies : reversedDeps;
+        for (const auto* dep : deps)
+
+        for (const auto* dep : deps)
             if (!dep->originalProject->flagPureDynamicLibrary)
                 writelnf(f, "target_link_libraries(%s %s)", p->mergedName.c_str(), dep->mergedName.c_str());
     }

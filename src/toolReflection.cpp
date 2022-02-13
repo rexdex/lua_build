@@ -2,6 +2,7 @@
 #include "toolReflection.h"
 #include "projectGenerator.h"
 
+
 //--
 
 ProjectReflection::~ProjectReflection()
@@ -27,7 +28,7 @@ static bool ProjectsNeedsReflectionUpdate(const fs::path& reflectionFile, const 
         bool hasChangedDetected = false;
         for (const auto* file : files)
         {
-            const auto sourceFileTimestamp = fs::last_write_time(file->file->absolutePath);
+            const auto sourceFileTimestamp = fs::last_write_time(file->absoluitePath);
             //std::cout << "Timestamp for source " << file->file->absolutePath << ": " << sourceFileTimestamp.time_since_epoch().count() << "\n";
 
             if (sourceFileTimestamp > reflectionFileTimestamp)
@@ -54,80 +55,56 @@ static bool ProjectsNeedsReflectionUpdate(const fs::path& reflectionFile, const 
     }
 }
 
-bool ProjectReflection::extract(const ProjectStructure& structure, const Configuration& config)
+bool ProjectReflection::extract(const fs::path& fileList)
 {
-    for (auto* proj : structure.projects)
+    try
     {
-        //if (proj->type == ProjectType::LocalApplication || proj->type == ProjectType::LocalLibrary)
-        {
-            // do not include dev-only project in standalone builds
-            if (config.build != BuildType::Development)
-            {
-                if (proj->flagDevOnly)
-                    continue;
-            } 
+        std::ifstream file(fileList);
 
-            std::vector<ProjectReflection::RefelctionFile*> localFiles;
-            for (const auto* file : proj->files)
+        {
+            std::string str;
+            std::getline(file, str);
+            std::getline(file, str);            
+        }
+
+        RefelctionProject* project = nullptr;
+
+        std::string str;
+        uint32_t numFiles = 0;
+        while (std::getline(file, str))
+        {
+            if (str == "PROJECT")
             {
-                if (file->type == ProjectFileType::CppSource)
-                {
-                    if (file->name != "build.cxx" && file->name != "build.cpp" && file->name != "main.cpp" && !EndsWith(file->name, ".c"))
-                    {
-                        auto* fileWrapper = new RefelctionFile();
-                        fileWrapper->file = file;
-                        fileWrapper->tokenized.contextPath = file->absolutePath;
-                        localFiles.push_back(fileWrapper);
-                    }
-                }
+                project = new RefelctionProject();
+                projects.push_back(project);
+
+                std::getline(file, project->mergedName);
+                std::getline(file, str);
+                project->reflectionFilePath = str;
+                continue;
             }
 
-            //if (!localFiles.empty())
+            if (project)
             {
-                const auto reflectionFilePath = config.solutionPath / "generated" / proj->mergedName / "reflection.cpp";
+                auto* file = new RefelctionFile();
+                file->absoluitePath = str;
+                project->files.push_back(file);
 
-                fs::file_time_type newestTimestamp;
-                if (ProjectsNeedsReflectionUpdate(reflectionFilePath, localFiles, newestTimestamp) || config.force)
-                {
-                    // if we are sure that project will have to be refreshed than run the project configurator
-                    // this is need to set the filter flags on files (ie. we may want to have different classes on different platforms)
-                    if (!proj->setupProject(config))
-                        return false;
-
-                    auto oldFiles = std::move(localFiles);
-                    for (auto* file : oldFiles)
-                    {
-                        if (!file->file->checkFilter(config.platform))
-                            continue;
-
-                        if (config.build != BuildType::Development)
-                            if (EndsWith(file->file->name, "_test.cpp") || EndsWith(file->file->name, "_tests.cpp"))
-                            {
-                                std::cout << "Skipped file " << file->file->absolutePath << " in reflection\n";
-                                continue;
-                            }
-
-                        localFiles.push_back(file);
-                        files.push_back(file);
-                    }
-
-                    //if (!localFiles.empty())
-                    {
-                        auto* projectWrapper = new RefelctionProject();
-                        projectWrapper->mergedName = proj->mergedName;
-                        projectWrapper->reflectionFilePath = reflectionFilePath;
-                        projectWrapper->files = std::move(localFiles);
-                        projectWrapper->reflectionFileTimstamp = newestTimestamp;
-                        projects.push_back(projectWrapper);
-                    }
-                }
+				numFiles += 1;
             }
         }
+
+        std::cout << "Loaded " << numFiles << " files from " << projects.size() << " for reflection\n";
+    }
+    catch (const std::exception& e)
+    {
+        std::cout << "Error parsing reflection list " << e.what() << "\n";
+        return false;
     }
 
-    std::cout << "Found " << projects.size() << " projects with " << files.size() << " files for reflection\n";
     return true;
 }
+
 
 bool ProjectReflection::tokenizeFiles()
 {
@@ -136,13 +113,13 @@ bool ProjectReflection::tokenizeFiles()
     for (auto* file : files)
     {
         std::string content;
-        if (LoadFileToString(file->file->absolutePath, content))
+        if (LoadFileToString(file->absoluitePath, content))
         {
             valid &= file->tokenized.tokenize(content);
         }
         else
         {
-            std::cout << "Failed to load content of file " << file->file->absolutePath << "\n";
+            std::cout << "Failed to load content of file " << file->absoluitePath << "\n";
             valid = false;
         }
     }
@@ -166,13 +143,13 @@ bool ProjectReflection::parseDeclarations()
     return valid;
 }
 
-bool ProjectReflection::generateReflection(ProjectGenerator& gen) const
+bool ProjectReflection::generateReflection(FileGenerator& files) const
 {
     bool valid = true;
 
     for (const auto* p : projects)
     {
-        auto file = gen.createFile(p->reflectionFilePath);
+        auto file = files.createFile(p->reflectionFilePath);
         file->customtTime = p->reflectionFileTimstamp;
         valid &= generateReflectionForProject(*p, file->content);
     }
@@ -305,68 +282,43 @@ bool ProjectReflection::generateReflectionForProject(const RefelctionProject& p,
 ToolReflection::ToolReflection()
 {}
 
-bool GenerateInlinedReflection(const Configuration& config, ProjectStructure& structure, ProjectGenerator& codeGenerator)
+bool GenerateInlinedReflection(const Configuration& config, const std::string& listPath)
 {
-    ProjectReflection reflection;
-
-    std::cout << "Extracting reflection data...\n";
-
-    if (!reflection.extract(structure, config))
-        return false;
-
-    if (!reflection.tokenizeFiles())
-        return false;
-
-    if (!reflection.parseDeclarations())
-        return false;
-
-    std::cout << "Generating reflection files...\n";
-
-    if (!reflection.generateReflection(codeGenerator))
-        return false;
-
-    return true;
+  
 }
 
 int ToolReflection::run(const char* argv0, const Commandline& cmdline)
 {
-    //--
+	ProjectReflection reflection;
 
-    Configuration config;
-    if (!config.parseOptions(argv0, cmdline)) {
-        std::cout << "Invalid/incomplete configuration\n";
+	std::cout << "Extracting reflection data...\n";
+
+    std::string fileListPath = cmdline.get("list");
+    if (fileListPath.empty())
+    {
+        std::cout << "Reflection file list must be specified by -list\n";
         return -1;
-    }
+    }    
 
-    if (!config.parsePaths(argv0, cmdline)) {
-        std::cout << "Invalid/incomplete configuration\n";
-        return -1;
-    }
+	if (!reflection.extract(fileListPath))
+		return -2;
 
-    //--
+	if (!reflection.tokenizeFiles())
+		return -3;
 
-    ProjectStructure structure;
+	if (!reflection.parseDeclarations())
+		return -4;
 
-    if (!config.engineSourcesPath.empty())
-        structure.scanProjects(ProjectGroupType::Engine, config.engineSourcesPath);
+	std::cout << "Generating reflection files...\n";
 
-    if (!config.projectSourcesPath.empty())
-        structure.scanProjects(ProjectGroupType::User, config.projectSourcesPath);
+    FileGenerator files;
+	if (!reflection.generateReflection(files))
+		return -5;
 
-    uint32_t totalFiles = 0;
-    if (!structure.scanContent(totalFiles))
-        return -1;
+    if (!files.saveFiles())
+        return -6;
 
-    std::cout << "Found " << totalFiles << " total files across " << structure.projects.size() << " projects\n";
-
-    ProjectGenerator codeGenerator(config);
-    if (!GenerateInlinedReflection(config, structure, codeGenerator))
-        return -1;
-
-    if (!codeGenerator.saveFiles())
-        return -1;
-
-    return 0;
+	return 0;
 }
 
 //--

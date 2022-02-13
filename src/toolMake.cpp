@@ -1,3 +1,8 @@
+#ifndef _MSC_VER
+#include <stdio.h>
+#include <termios.h>
+#endif
+
 #include "common.h"
 #include "toolMake.h"
 #include "toolReflection.h"
@@ -5,14 +10,12 @@
 #include "solutionGeneratorVS.h"
 #include "solutionGeneratorCMAKE.h"
 
-#ifdef _WIN32
-#include <Windows.h>
-#include <conio.h>
-#endif
-
 //--
 
-#ifdef _WIN32
+#ifdef _MSC_VER
+#include <Windows.h>
+#include <conio.h>
+
 static void ClearConsole()
 {
     COORD topLeft = { 0, 0 };
@@ -28,8 +31,32 @@ static void ClearConsole()
 #else
 static void ClearConsole()
 {
-    std::std::cout << "\x1B[2J\x1B[H";
+    std::cout << "\x1B[2J\x1B[H";
 }
+
+static struct termios old, current;
+
+void initTermios() {
+    tcgetattr(0, &old);
+    current = old;
+    current.c_lflag &= ~ICANON;
+    current.c_lflag &= ~ECHO;
+    tcsetattr(0, TCSANOW, &current);
+}
+
+void resetTermios() {
+    tcsetattr(0, TCSANOW, &old);
+}
+
+char _getch()
+{
+    char ch;
+    initTermios();
+    ch = getchar();
+    resetTermios();
+    return ch;
+}
+
 #endif
 
 template< typename T >
@@ -39,8 +66,8 @@ bool ConfigEnum(T& option, const char* title)
 
     int maxOption = (int)T::MAX;
 
-    std::cout << title << "\n";
-    std::cout << "\n";
+    std::cout << title << std::endl;
+    std::cout << std::endl;
     std::cout << "Options:\n";
 
     for (int i = 0; i < maxOption; ++i)
@@ -50,10 +77,10 @@ bool ConfigEnum(T& option, const char* title)
 
         if (option == (T)i)
             std::cout << " (current)";
-        std::cout << "\n";
+        std::cout << std::endl;
     }
-    std::cout << "\n";
-    std::cout << "\n";
+    std::cout << std::endl;
+    std::cout << std::endl;
 
     std::cout << "Press (1-" << maxOption << ") to select option\n";
     std::cout << "Press (ENTER) to use current option (" << NameEnumOption(option) << ")\n";
@@ -62,7 +89,8 @@ bool ConfigEnum(T& option, const char* title)
     for (;;)
     {
         auto ch = _getch();
-        if (ch == 13)
+        std::cout << "Code: " << (int)ch << std::endl;
+        if (ch == 13 || ch == 10)
             return true;
         if (ch == 27)
             return false;
@@ -77,11 +105,11 @@ bool ConfigEnum(T& option, const char* title)
 
 static void PrintConfig(const Configuration& cfg)
 {
-    std::cout << "  Platform  : " << NameEnumOption(cfg.platform) << "\n";
-    std::cout << "  Generator : " << NameEnumOption(cfg.generator) << "\n";
-    std::cout << "  Build     : " << NameEnumOption(cfg.build) << "\n";
-    std::cout << "  Libraries : " << NameEnumOption(cfg.libs) << "\n";
-    std::cout << "  Config    : " << NameEnumOption(cfg.configuration) << "\n";
+    std::cout << "  Platform  : " << NameEnumOption(cfg.platform) << std::endl;
+    std::cout << "  Generator : " << NameEnumOption(cfg.generator) << std::endl;
+    std::cout << "  Build     : " << NameEnumOption(cfg.build) << std::endl;
+    std::cout << "  Libraries : " << NameEnumOption(cfg.libs) << std::endl;
+    std::cout << "  Config    : " << NameEnumOption(cfg.configuration) << std::endl;
 }
 
 bool RunInteractiveConfig(Configuration& cfg)
@@ -90,18 +118,19 @@ bool RunInteractiveConfig(Configuration& cfg)
 
     if (cfg.load(configPath))
     {
-        std::cout << "\n";
-        std::cout << "Loaded existing configuration:\n";
+        std::cout << std::endl;
+        std::cout << "Loaded existing configuration:" << std::endl;
         PrintConfig(cfg);
-        std::cout << "\n";
-        std::cout << "\n";
-        std::cout << "Press (ENTER) to use\n";
-        std::cout << "Press (ESC) to edit\n";
+        std::cout << std::endl;
+        std::cout << std::endl;
+        std::cout << "Press (ENTER) to use" << std::endl;
+        std::cout << "Press (ESC) to edit" << std::endl;
 
         for (;;)
         {
             auto ch = _getch();
-            if (ch == 13)
+            std::cout << "Code: " << (int)ch << std::endl;
+            if (ch == 13 || ch == 10)
                 return true;
             if (ch == 27)
                 break;
@@ -197,6 +226,10 @@ int ToolMake::run(const char* argv0, const Commandline& cmdline)
     if (!structure.resolveProjectDependencies(config))
         return -1;
 
+    if (config.build == BuildType::Standalone)
+        if (!structure.makeModules(config))
+            return -1;
+
     std::cout << "Found " << totalFiles << " total files across " << structure.projects.size() << " projects\n";
 
     if (!structure.deployFiles(config))
@@ -222,8 +255,12 @@ int ToolMake::run(const char* argv0, const Commandline& cmdline)
     }
     else if (config.generator == GeneratorType::CMake)
     {
-        if (!GenerateInlinedReflection(config, structure, codeGenerator))
-            return -1;
+        ToolReflection tool;
+
+        /*Commandline fakeCommandLine;
+        fakeCommandLine.args.emplace_back({"list", )
+        if (!tool.run("", 
+            return -1;*/
 
         SolutionGeneratorCMAKE gen(config, codeGenerator);
         if (!gen.generateSolution())

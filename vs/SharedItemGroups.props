@@ -132,6 +132,9 @@
       <!-- We do want to use minimal rebuilds by default -->
       <MinimalRebuild Condition="'$(UseMinimalRebuild)' == ''">true</MinimalRebuild>
 
+      <!-- Compile on multiple threads -->
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+
       <!-- We don't use exception handling by default -->
       <!-- ExceptionHandling Condition="'$(ProjectExceptionHandling)'==''">false</ExceptionHandling-->
 
@@ -243,7 +246,7 @@
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <FloatingPointModel>Fast</FloatingPointModel>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
-      <BufferSecurityCheck>false</BufferSecurityCheck>      	  
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
   </ItemDefinitionGroup>
   
@@ -271,5 +274,9 @@
     <Link>
     </Link>
   </ItemDefinitionGroup>
+
+  <!-- -->
+
+  <!-- -->
   
 </Project>

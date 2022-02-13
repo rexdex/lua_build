@@ -131,3 +131,16 @@ extern bool ParseGeneratorType(std::string_view txt, GeneratorType& outType);
 extern bool CheckPlatformFilter(ProjectFilePlatformFilter filter, PlatformType platform);
 
 //--
+
+template< typename T >
+bool PushBackUnique(std::vector<T>& ar, const T& data)
+{
+    auto it = std::find(ar.begin(), ar.end(), data);
+    if (it != ar.end())
+        return false;
+
+    ar.push_back(data);
+    return true;
+}
+
+//--

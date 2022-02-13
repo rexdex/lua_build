@@ -4,10 +4,24 @@
   <!-- PRE BUILD TARGETS  -->
   <!-- PRE BUILD TARGETS  -->
   
-    <!-- Prevent compilation if WindowsSDK is not detected -->
+  <!-- Prevent compilation if WindowsSDK is not detected -->
   <Target Name="CheckWindowsSDK" BeforeTargets="ClCompile">
     <Error Condition="'$(WindowsTargetPlatformVersion)'==''" Text="Windows 10 SDK not detected!"/>
     <Message Text="Using Windows SDK version $(WindowsTargetPlatformVersion)" Importance="high"/>
+  </Target>
+
+  <!-- Embedded media compiler -->
+  <!--<Target Name="CompileEmbeddedMedia" BeforeTargets="ClCompile" Inputs="@(EmbeddedMedia)" Outputs="@(EmbeddedMedia->'$(ProjectGeneratedPath)EmbeddedMedia_$(ProjectName)_%(Filename)_data.cpp');@(EmbeddedMedia->'$(ProjectGeneratedPath)EmbeddedMedia_$(ProjectName)_%(Filename)_meta.xml')">
+    <Message Text="Compiling embedded media '%(EmbeddedMedia.Filename)%(Extension)'..." Importance="high" />
+    <Error Text="No tool to compile embedded media found, was tool_embedd compiled properly?" Condition="!Exists('$(ProjectPublishPath)tool_fxc.exe')" />
+    <Exec Command="$(ProjectPublishPath)tool_fxc.exe pack -input=&quot;%(EmbeddedMedia.FullPath)&quot; -output=&quot;$(ProjectGeneratedPath)EmbeddedMedia_$(ProjectName)_%(Filename)_data.cpp&quot; -meta=&quot;$(ProjectGeneratedPath)EmbeddedMedia_$(ProjectName)_%(Filename)_meta.xml&quot; -platform=windows -project=$(ProjectName)"/>
+    <Error Text="Failed to compile embedded media from '%(EmbeddedMedia.Filename)%(Extension)'" Condition="!Exists('$(ProjectGeneratedPath)EmbeddedMedia_$(ProjectName)_%(Filename)_data.cpp')" />
+  </Target>-->
+
+  <Target Name="CompileEmbeddedMedia" BeforeTargets="ClCompile" Inputs="@(EmbeddedMedia)" Outputs="@(EmbeddedMedia->'$(ProjectGeneratedPath)EmbeddedMediaInfo.txt')">
+    <Message Text="Compiling embedded media '%(EmbeddedMedia.Filename)%(Extension)'..." Importance="high" />
+    <Error Text="No tool to compile embedded media found, was tool_embedd compiled properly?" Condition="!Exists('$(ProjectPublishPath)tool_fxc.exe')" />
+    <Exec Command="$(ProjectPublishPath)tool_fxc.exe pack -input=&quot;%(EmbeddedMedia.FullPath)&quot;"/>
   </Target>
   
   <!-- POST BUILD TARGETS  -->
